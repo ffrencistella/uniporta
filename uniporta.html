@@ -469,13 +469,26 @@ async function loadMyTickets(){
   TICKETS = data || [];
 }
 
-async function loadMyProfile(){
-  const { data: sess } = await sb.auth.getSession();
-  const user = sess && sess.session ? sess.session.user : null;
-  if(!user){ PROFILE = null; return; }
-  const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
-  if(error || !data){ PROFILE = null; return; }
-  PROFILE = data;
+async function loadMyProfile(knownUserId){
+  // Se conosciamo già l'id utente (appena tornato da login/registrazione)
+  // lo usiamo direttamente, senza rifare la domanda "chi sono?" a
+  // Supabase: evita un piccolo ritardo in cui la sessione potrebbe non
+  // essere ancora pronta per essere riletta.
+  let userId = knownUserId;
+  if(!userId){
+    const { data: sess } = await sb.auth.getSession();
+    userId = sess && sess.session ? sess.session.user.id : null;
+  }
+  if(!userId){ PROFILE = null; return; }
+  // Un profilo appena creato dal trigger del database potrebbe non essere
+  // ancora visibile al primissimo tentativo: riproviamo un paio di volte
+  // con una breve pausa prima di arrenderci.
+  for(let attempt=0; attempt<3; attempt++){
+    const { data, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+    if(!error && data){ PROFILE = data; return; }
+    if(attempt<2) await new Promise(r=>setTimeout(r, 500));
+  }
+  PROFILE = null;
 }
 
 async function loadMyHistory(){
@@ -618,11 +631,7 @@ $('btnDoRegister').addEventListener('click', async ()=>{
     return;
   }
 
-  // Il trigger sul database crea il profilo nello stesso istante in cui
-  // viene creato l'account: un piccolo margine di attesa evita di leggerlo
-  // prima che sia pronto.
-  await new Promise(r=>setTimeout(r, 400));
-  await loadMyProfile();
+  await loadMyProfile(data.user.id);
   await loadMyTickets();
   if(!PROFILE){ err.textContent = 'Account creato ma il profilo non è ancora pronto: riprova ad accedere tra qualche secondo.'; return; }
   closeAuth();
@@ -636,7 +645,7 @@ $('btnDoLogin').addEventListener('click', async ()=>{
   if(!email||!pw){ err.textContent='Inserisci email e password.'; return; }
   const { data, error } = await sb.auth.signInWithPassword({ email, password: pw });
   if(error){ err.textContent = 'Credenziali non valide.'; return; }
-  await loadMyProfile();
+  await loadMyProfile(data.user.id);
   await loadMyTickets();
   if(!PROFILE){ err.textContent = 'Profilo non trovato per questo account.'; return; }
   closeAuth();
