@@ -6,6 +6,7 @@
 <title>UNIPORTA · Staff</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700;800&display=swap');
 
@@ -154,10 +155,11 @@
       <div class="eyebrow">UniPorta</div>
       <h1>Accesso operatore</h1>
       <div class="login-card">
-        <div class="field"><label>Codice operatore</label><input type="password" id="opCode" placeholder="Codice fornito dallo staff"></div>
+        <div class="field"><label>Email staff</label><input type="email" id="opEmail" placeholder="staff@uniporta.it"></div>
+        <div class="field"><label>Password</label><input type="password" id="opPw" placeholder="••••••••"></div>
         <div class="err" id="opErr"></div>
         <button class="btn btn-primary" id="btnOpLogin">Entra</button>
-        <div class="status-note">Demo: codice <b style="color:var(--yellow)">UNIPORTA-STAFF</b></div>
+        <div class="status-note">Il tuo account deve essere registrato come operatore su Supabase.</div>
       </div>
     </div>
   </div>
@@ -255,6 +257,11 @@
 </div>
 
 <script>
+/* ================= SUPABASE ================= */
+const SUPABASE_URL = 'https://lmaaeehjcayweiqfbaul.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_AJvuK41LyXPresYx-oPd3g_voMzlkrP';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 /* ================= UTILS ================= */
 function $(id){ return document.getElementById(id); }
 function esc(str){
@@ -268,7 +275,6 @@ function toast(msg, isError){
   clearTimeout(toast._to);
   toast._to = setTimeout(()=>t.classList.remove('show'), 2800);
 }
-function genId(prefix){ return prefix+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
 /* window.confirm() è spesso bloccato negli ambienti di anteprima sandboxed:
    il click sul bottone non fa nulla in quei casi. Questa conferma interna
@@ -290,79 +296,33 @@ function showConfirm(msg){
   });
 }
 
-/* ================= STORAGE LAYER =================
-   Stesso DB_KEY dell'app utente: le due app condividono i dati demo
-   tramite lo storage dell'artifact. In produzione (Supabase) la
-   condivisione sarà reale e indipendente da dove è ospitata ogni app.
+/* ================= STATO IN MEMORIA =================
+   Ricaricato da Supabase a ogni azione rilevante (niente più un unico
+   "blob" condiviso: ogni tabella è interrogata quando serve). */
+let EVENTS_ACTIVE = [];
+let EVENTS_ARCHIVE = [];
+let USERS = [];
 
-   NOTA: window.storage esiste solo dentro l'anteprima di Claude. Ospitata
-   altrove (GitHub Pages, ecc.) userà localStorage del browser: i dati
-   restano su quel dispositivo, non condivisi con l'app utente su un
-   telefono diverso — per la condivisione reale serve Supabase. */
-
-const hasArtifactStorage = (typeof window.storage !== 'undefined');
-async function storageGet(key, shared){
-  if(hasArtifactStorage){
-    try{ return await window.storage.get(key, shared); }catch(e){ return null; }
-  }
-  try{
-    const raw = localStorage.getItem(key);
-    return raw ? { key, value: raw, shared } : null;
-  }catch(e){ return null; }
+async function loadActiveEvents(){
+  const { data } = await sb.from('events').select('*').eq('archived', false).order('created_at', { ascending:false });
+  EVENTS_ACTIVE = data || [];
 }
-async function storageSet(key, value, shared){
-  if(hasArtifactStorage){
-    try{ return await window.storage.set(key, value, shared); }catch(e){ return null; }
-  }
-  try{ localStorage.setItem(key, value); return { key, value, shared }; }
-  catch(e){ return null; }
+async function loadArchivedEvents(){
+  const { data } = await sb.from('events').select('*').eq('archived', true).order('archived_at', { ascending:false });
+  EVENTS_ARCHIVE = data || [];
 }
-
-const DB_KEY = 'uniporta_db_v3';
-let DB = { users: [], events: [] };
-
-function defaultEvents(){
-  return [
-    { id:genId('ev'), title:'APERICAMPUS NIGHT', date:'Giovedì 18 Settembre', time:'21:30',
-      place:'Chiringuito Wave, Rimini', desc:'Serata di apertura semestre per fuorisede e studenti UniPorta.', posterDataUrl:null },
-    { id:genId('ev'), title:'CLUB 1 PIANO — OPENING', date:'Sabato 20 Settembre', time:'23:00',
-      place:'Club 1 Piano, Rimini', desc:'Serata di apertura stagione, ingresso gratuito con ticket UniPorta.', posterDataUrl:null }
-  ];
+async function loadUsers(){
+  const { data } = await sb.from('profiles').select('*').order('created_at', { ascending:false });
+  USERS = data || [];
 }
-
-async function loadDB(){
-  try{
-    const res = await storageGet(DB_KEY, true);
-    if(res && res.value){ DB = JSON.parse(res.value); }
-  }catch(e){}
-  if(!DB.events || !DB.events.length) DB.events = defaultEvents();
-  if(!DB.users) DB.users = [];
-  await saveDB();
+async function ticketCountsForEvent(eventId){
+  const { data } = await sb.from('tickets').select('used').eq('event_id', eventId);
+  const rows = data || [];
+  return { total: rows.length, used: rows.filter(r=>r.used).length };
 }
-async function saveDB(){
-  try{ await storageSet(DB_KEY, JSON.stringify(DB), true); }
-  catch(e){ console.error('Storage error', e); }
-}
-async function withFreshDB(mutator){
-  try{
-    const res = await storageGet(DB_KEY, true);
-    if(res && res.value){ DB = JSON.parse(res.value); }
-  }catch(e){}
-  if(!DB.events || !DB.events.length) DB.events = defaultEvents();
-  if(!DB.users) DB.users = [];
-  const result = mutator(DB);
-  await saveDB();
-  return result;
-}
-
-const OP_SESSION_KEY = 'uniporta_operator_session';
-async function saveOpSession(v){ try{ await storageSet(OP_SESSION_KEY, JSON.stringify(v), false); }catch(e){} }
-async function loadOpSession(){
-  try{
-    const res = await storageGet(OP_SESSION_KEY, false);
-    if(res && res.value) return JSON.parse(res.value);
-  }catch(e){}
-  return { loggedIn:false };
+async function checkinsForUser(userId){
+  const { data } = await sb.from('tickets').select('used').eq('user_id', userId).eq('used', true);
+  return (data || []).length;
 }
 
 /* ================= NAVIGAZIONE ================= */
@@ -383,99 +343,93 @@ document.querySelectorAll('.tab2').forEach(tab=>{
   });
 });
 
-/* ================= LOGIN OPERATORE ================= */
+/* ================= LOGIN OPERATORE =================
+   Login vero con Supabase Auth (email + password). Dopo il login
+   verifichiamo che l'account sia effettivamente registrato nella
+   tabella "operators" e attivo: se non lo è, non ha i permessi per
+   vedere o gestire i dati (le regole di sicurezza del database lo
+   impedirebbero comunque), quindi lo disconnettiamo subito. */
+let currentOperator = null;
+
 $('btnOpLogin').addEventListener('click', async ()=>{
-  const code = $('opCode').value.trim();
+  const email = $('opEmail').value.trim().toLowerCase();
+  const pw = $('opPw').value;
   const err = $('opErr'); err.textContent='';
-  if(code !== 'UNIPORTA-STAFF'){ err.textContent='Codice non valido.'; return; }
-  await saveOpSession({ loggedIn:true });
+  if(!email||!pw){ err.textContent='Inserisci email e password.'; return; }
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pw });
+  if(error){ err.textContent = 'Credenziali non valide.'; return; }
+  const { data: op } = await sb.from('operators').select('*').eq('id', data.user.id).eq('attivo', true).maybeSingle();
+  if(!op){
+    await sb.auth.signOut();
+    err.textContent = 'Questo account non è registrato come operatore attivo.';
+    return;
+  }
+  currentOperator = op;
   await enterDashboard();
 });
 
 async function enterDashboard(){
-  await withFreshDB(()=>{});
+  await loadActiveEvents();
+  await loadArchivedEvents();
+  await loadUsers();
   showView('view-dash');
-  renderStats();
+  await renderStats();
   renderEventManageList();
   renderUserTable();
   startPolling();
 }
 
 /* ================= DASHBOARD STATS ================= */
-function renderStats(){
-  $('opStatUsers').textContent = DB.users.length;
-  let checkins = 0, points = 0;
-  DB.users.forEach(u=>{
-    points += u.points;
-    (u.tickets||[]).forEach(t=>{ if(t.used) checkins++; });
-  });
+async function renderStats(){
+  $('opStatUsers').textContent = USERS.length;
+  let checkins = 0;
+  for(const e of EVENTS_ACTIVE){
+    const c = await ticketCountsForEvent(e.id);
+    checkins += c.used;
+  }
+  EVENTS_ARCHIVE.forEach(e=>{ checkins += e.archive_used || 0; });
+  const points = USERS.reduce((sum,u)=> sum + (u.punti||0), 0);
   $('opStatCheckins').textContent = checkins;
   $('opStatPoints').textContent = points;
 }
 
-/* ================= SCANNER (check-in + bonus) ================= */
-function findTicketByCode(code){
-  for(const u of DB.users){
-    const t = (u.tickets||[]).find(t=>t.code===code);
-    if(t) return { user:u, ticket:t };
-  }
-  return null;
-}
-function findUserByPersonalCode(code){
-  return DB.users.find(u=>u.code===code) || null;
-}
-
+/* ================= SCANNER (check-in + bonus) =================
+   Prova prima come ticket evento (uso singolo, via RPC checkin_ticket);
+   se il codice non corrisponde a nessun ticket, prova come QR personale
+   (punto bonus, riutilizzabile, via RPC award_bonus_point). */
 async function processScan(rawCode){
   const err = $('scanErr'); err.textContent='';
   const code = rawCode.trim().toUpperCase();
   if(!code){ err.textContent='Inserisci un codice.'; return false; }
 
-  let outcome = null; // {type:'checkin'|'checkin_used'|'bonus'|'notfound', user, ticket, event}
-
-  await withFreshDB(db=>{
-    // 1) prova come ticket evento (uso singolo)
-    for(const u of db.users){
-      const t = (u.tickets||[]).find(t=>t.code===code);
-      if(t){
-        if(t.used){
-          outcome = { type:'checkin_used', user:u, ticket:t };
-          return;
-        }
-        t.used = true;
-        t.usedAt = new Date().toISOString();
-        u.points += 1;
-        const ev = db.events.find(e=>e.id===t.eventId);
-        u.history.unshift({ label:'Check-in: '+(ev?ev.title:'Evento'), date:new Date().toLocaleDateString('it-IT'), pts:1, type:'credit' });
-        outcome = { type:'checkin', user:u, ticket:t, event:ev };
-        return;
-      }
-    }
-    // 2) prova come QR personale (punto bonus, riutilizzabile)
-    const u2 = db.users.find(u=>u.code===code);
-    if(u2){
-      u2.points += 1;
-      u2.history.unshift({ label:'Punto bonus (staff)', date:new Date().toLocaleDateString('it-IT'), pts:1, type:'bonus' });
-      outcome = { type:'bonus', user:u2 };
-      return;
-    }
-    outcome = { type:'notfound' };
-  });
-
-  if(outcome.type==='checkin'){
-    toast('✓ Check-in ' + outcome.user.nome+' '+outcome.user.cognome + ' — +1 punto');
-  } else if(outcome.type==='checkin_used'){
-    const when = outcome.ticket.usedAt ? new Date(outcome.ticket.usedAt).toLocaleString('it-IT') : '';
+  const { data: r1 } = await sb.rpc('checkin_ticket', { p_code: code });
+  if(r1 && r1.ok){
+    toast('✓ Check-in ' + r1.nome+' '+r1.cognome + ' — +1 punto');
+    await renderStats(); await loadUsers(); renderUserTable();
+    return true;
+  }
+  if(r1 && r1.error==='already_used'){
+    const when = r1.used_at ? new Date(r1.used_at).toLocaleString('it-IT') : '';
     err.textContent = 'Ticket già utilizzato' + (when? ' il '+when : '') + '.';
     toast('Ticket già usato — nessun punto assegnato', true);
-  } else if(outcome.type==='bonus'){
-    toast('+1 punto bonus a ' + outcome.user.nome+' '+outcome.user.cognome);
-  } else {
-    err.textContent = 'Nessun ticket o utente trovato con questo codice.';
-    toast('Codice non riconosciuto', true);
+    return false;
   }
-  renderStats();
-  renderUserTable();
-  return outcome.type==='checkin' || outcome.type==='bonus';
+  if(r1 && r1.error==='not_operator'){
+    err.textContent = 'Il tuo account non ha i permessi di operatore.';
+    toast('Permessi insufficienti', true);
+    return false;
+  }
+
+  const { data: r2 } = await sb.rpc('award_bonus_point', { p_qr_code: code });
+  if(r2 && r2.ok){
+    toast('+1 punto bonus a ' + r2.nome+' '+r2.cognome);
+    await renderStats(); await loadUsers(); renderUserTable();
+    return true;
+  }
+
+  err.textContent = 'Nessun ticket o utente trovato con questo codice.';
+  toast('Codice non riconosciuto', true);
+  return false;
 }
 
 $('btnAssignPoint').addEventListener('click', async ()=>{
@@ -556,7 +510,7 @@ $('posterFile').addEventListener('change', (e)=>{
   reader.onload = (ev)=>{
     const img = new Image();
     img.onload = ()=>{
-      // ridimensiona lato client per non appesantire lo storage condiviso
+      // ridimensiona lato client per non appesantire il database (salvato come testo)
       const maxW = 900;
       const scale = Math.min(1, maxW / img.width);
       const canvas = document.createElement('canvas');
@@ -583,16 +537,20 @@ function resetEventForm(){
 }
 $('btnCancelEdit').addEventListener('click', resetEventForm);
 
+function findAnyEvent(eventId){
+  return EVENTS_ACTIVE.find(e=>e.id===eventId) || EVENTS_ARCHIVE.find(e=>e.id===eventId) || null;
+}
+
 function startEditEvent(eventId){
-  const e = DB.events.find(ev=>ev.id===eventId);
+  const e = findAnyEvent(eventId);
   if(!e) return;
   editingEventId = eventId;
   $('newEvTitle').value = e.title;
-  $('newEvDate').value = e.date;
-  $('newEvTime').value = e.time;
+  $('newEvDate').value = e.event_date;
+  $('newEvTime').value = e.event_time;
   $('newEvPlace').value = e.place;
-  $('newEvDesc').value = e.desc || '';
-  posterDataUrl = e.posterDataUrl || null;
+  $('newEvDesc').value = e.description || '';
+  posterDataUrl = e.poster_url || null;
   $('posterPreviewWrap').innerHTML = posterDataUrl
     ? `<img src="${posterDataUrl}" alt="Anteprima locandina">`
     : '<div class="ph">Tocca per caricare la locandina dell\'evento (opzionale)</div>';
@@ -604,61 +562,54 @@ function startEditEvent(eventId){
 
 $('btnCreateEvent').addEventListener('click', async ()=>{
   const title = $('newEvTitle').value.trim();
-  const date = $('newEvDate').value.trim();
-  const time = $('newEvTime').value.trim();
+  const event_date = $('newEvDate').value.trim();
+  const event_time = $('newEvTime').value.trim();
   const place = $('newEvPlace').value.trim();
-  const desc = $('newEvDesc').value.trim();
+  const description = $('newEvDesc').value.trim() || 'Nessuna descrizione fornita.';
   const err = $('newEvErr'); err.textContent='';
-  if(!title||!date||!time||!place){ err.textContent='Compila almeno titolo, data, orario e luogo.'; return; }
+  if(!title||!event_date||!event_time||!place){ err.textContent='Compila almeno titolo, data, orario e luogo.'; return; }
 
   if(editingEventId){
     // La modifica aggiorna solo il record evento "live": i ticket già
     // generati mantengono lo snapshot dei dati salvato al momento della
     // partecipazione, quindi non vengono alterati retroattivamente.
-    let notFound = false;
-    await withFreshDB(db=>{
-      const e = db.events.find(ev=>ev.id===editingEventId);
-      if(!e){ notFound = true; return; }
-      e.title = title; e.date = date; e.time = time; e.place = place;
-      e.desc = desc || 'Nessuna descrizione fornita.';
-      e.posterDataUrl = posterDataUrl;
-    });
-    if(notFound){ toast('Evento non trovato, forse è stato eliminato.', true); resetEventForm(); renderEventManageList(); return; }
+    const { error } = await sb.from('events').update({
+      title, event_date, event_time, place, description, poster_url: posterDataUrl
+    }).eq('id', editingEventId);
+    if(error){ toast('Errore nel salvataggio: '+error.message, true); return; }
     toast('Modifiche salvate ✓');
   } else {
-    await withFreshDB(db=>{
-      db.events.unshift({
-        id:genId('ev'), title, date, time, place, desc: desc || 'Nessuna descrizione fornita.',
-        posterDataUrl, archived:false, endedAt:null, archiveStats:null
-      });
+    const { error } = await sb.from('events').insert({
+      title, event_date, event_time, place, description, poster_url: posterDataUrl
     });
+    if(error){ toast('Errore nella pubblicazione: '+error.message, true); return; }
     toast('Evento pubblicato ✓');
   }
   resetEventForm();
+  await loadActiveEvents();
   renderEventManageList();
 });
 
-function renderEventManageList(){
+async function renderEventManageList(){
   const wrap = $('eventManageList');
-  const events = DB.events.filter(e => eventTabMode==='archive' ? e.archived : !e.archived);
+  const events = eventTabMode==='archive' ? EVENTS_ARCHIVE : EVENTS_ACTIVE;
 
   if(!events.length){
     wrap.innerHTML = `<div class="empty">${eventTabMode==='archive' ? 'Nessun evento archiviato ancora.' : 'Nessun evento attivo al momento.'}</div>`;
     return;
   }
 
-  wrap.innerHTML = events.map(e=>{
-    const hasImg = !!e.posterDataUrl;
+  const cards = await Promise.all(events.map(async e=>{
+    const hasImg = !!e.poster_url;
     let total, used;
-    if(e.archived && e.archiveStats){
-      total = e.archiveStats.total; used = e.archiveStats.used;
+    if(e.archived){
+      total = e.archive_total || 0; used = e.archive_used || 0;
     } else {
-      const tickets = [];
-      DB.users.forEach(u=> (u.tickets||[]).forEach(t=>{ if(t.eventId===e.id) tickets.push(t); }));
-      total = tickets.length; used = tickets.filter(t=>t.used).length;
+      const c = await ticketCountsForEvent(e.id);
+      total = c.total; used = c.used;
     }
     const actions = e.archived
-      ? `<span class="em-archived-badge">Archiviato il ${e.endedAt ? new Date(e.endedAt).toLocaleDateString('it-IT') : ''}</span>`
+      ? `<span class="em-archived-badge">Archiviato il ${e.archived_at ? new Date(e.archived_at).toLocaleDateString('it-IT') : ''}</span>`
       : `<div class="em-actions">
            <button class="btn btn-outline" data-edit-event="${esc(e.id)}">Modifica</button>
            <button class="btn btn-outline" data-end-event="${esc(e.id)}" style="color:#ffb020;border-color:#ffb020;">Concludi</button>
@@ -666,10 +617,10 @@ function renderEventManageList(){
          </div>`;
     return `
     <div class="event-manage-card">
-      <div class="em-poster ${hasImg?'':'no-img'}" ${hasImg?`style="background-image:url('${e.posterDataUrl}')"`:''}></div>
+      <div class="em-poster ${hasImg?'':'no-img'}" ${hasImg?`style="background-image:url('${e.poster_url}')"`:''}></div>
       <div class="em-body">
         <h3>${esc(e.title)}</h3>
-        <div class="em-meta">📅 ${esc(e.date)} · 🕘 ${esc(e.time)} · 📍 ${esc(e.place)}</div>
+        <div class="em-meta">📅 ${esc(e.event_date)} · 🕘 ${esc(e.event_time)} · 📍 ${esc(e.place)}</div>
         <div class="em-counts">
           <div class="em-count"><div class="v">${total}</div><div class="l">Ticket generati</div></div>
           <div class="em-count"><div class="v">${used}</div><div class="l">Check-in</div></div>
@@ -678,7 +629,9 @@ function renderEventManageList(){
         ${actions}
       </div>
     </div>`;
-  }).join('');
+  }));
+
+  wrap.innerHTML = cards.join('');
 
   wrap.querySelectorAll('[data-edit-event]').forEach(btn=>{
     btn.addEventListener('click', ()=> startEditEvent(btn.dataset.editEvent));
@@ -692,55 +645,42 @@ function renderEventManageList(){
 }
 
 async function endEvent(eventId){
-  const e = DB.events.find(ev=>ev.id===eventId);
+  const e = findAnyEvent(eventId);
   if(!e) return;
-  const tickets = [];
-  DB.users.forEach(u=> (u.tickets||[]).forEach(t=>{ if(t.eventId===eventId) tickets.push(t); }));
-  const total = tickets.length, used = tickets.filter(t=>t.used).length;
+  const c = await ticketCountsForEvent(eventId);
 
-  let msg = `Concludere "${e.title}"?\n\nL'evento passerà in archivio e non sarà più prenotabile. Tutti i ticket ancora attivi (${total-used} in attesa, ${used} già scansionati) verranno rimossi dai profili utente. I punti già accreditati con i check-in restano acquisiti.`;
+  let msg = `Concludere "${e.title}"?\n\nL'evento passerà in archivio e non sarà più prenotabile. Tutti i ticket ancora attivi (${c.total-c.used} in attesa, ${c.used} già scansionati) verranno rimossi dai profili utente. I punti già accreditati con i check-in restano acquisiti.`;
   const ok = await showConfirm(msg);
   if(!ok) return;
 
-  await withFreshDB(db=>{
-    const ev = db.events.find(x=>x.id===eventId);
-    if(!ev) return;
-    ev.archived = true;
-    ev.endedAt = new Date().toISOString();
-    ev.archiveStats = { total, used };
-    db.users.forEach(u=>{
-      if(u.tickets) u.tickets = u.tickets.filter(t=>t.eventId!==eventId);
-    });
-  });
+  const { data, error } = await sb.rpc('end_event', { p_event_id: eventId });
+  if(error || !data || !data.ok){ toast('Errore nella conclusione evento.', true); return; }
   toast('Evento concluso e archiviato ✓');
   if(editingEventId===eventId) resetEventForm();
-  renderStats();
+  await loadActiveEvents(); await loadArchivedEvents(); await loadUsers();
+  await renderStats();
   renderEventManageList();
   renderUserTable();
 }
 
 async function deleteEvent(eventId){
-  const e = DB.events.find(ev=>ev.id===eventId);
+  const e = findAnyEvent(eventId);
   if(!e) return;
-  const tickets = [];
-  DB.users.forEach(u=> (u.tickets||[]).forEach(t=>{ if(t.eventId===eventId) tickets.push(t); }));
+  const c = await ticketCountsForEvent(eventId);
 
   let msg = `Eliminare definitivamente "${e.title}"?\n\nA differenza di "Concludi", eliminare rimuove l'evento anche dall'archivio: non resterà traccia. Usa "Concludi evento" se vuoi mantenere lo storico.`;
-  if(tickets.length){
-    msg += `\n\nInoltre ${tickets.length} utenti hanno già un ticket per questo evento (${tickets.filter(t=>t.used).length} già scansionati). I ticket verranno rimossi dai loro profili, ma i punti già accreditati per i check-in avvenuti NON verranno tolti.`;
+  if(c.total){
+    msg += `\n\nInoltre ${c.total} utenti hanno già un ticket per questo evento (${c.used} già scansionati). I ticket verranno rimossi dai loro profili, ma i punti già accreditati per i check-in avvenuti NON verranno tolti.`;
   }
   const ok = await showConfirm(msg);
   if(!ok) return;
 
-  await withFreshDB(db=>{
-    db.events = db.events.filter(ev=>ev.id!==eventId);
-    db.users.forEach(u=>{
-      if(u.tickets) u.tickets = u.tickets.filter(t=>t.eventId!==eventId);
-    });
-  });
+  const { error } = await sb.from('events').delete().eq('id', eventId);
+  if(error){ toast('Errore nell\'eliminazione: '+error.message, true); return; }
   if(editingEventId===eventId) resetEventForm();
   toast('Evento eliminato');
-  renderStats();
+  await loadActiveEvents(); await loadArchivedEvents(); await loadUsers();
+  await renderStats();
   renderEventManageList();
   renderUserTable();
 }
@@ -748,55 +688,55 @@ async function deleteEvent(eventId){
 /* ================= UTENTI ================= */
 let opSearchTerm = '';
 $('opSearch').addEventListener('input', (e)=>{ opSearchTerm = e.target.value.trim().toLowerCase(); renderUserTable(); });
-$('btnRefreshOp').addEventListener('click', async ()=>{ await withFreshDB(()=>{}); renderStats(); renderUserTable(); renderEventManageList(); toast('Dati aggiornati'); });
+$('btnRefreshOp').addEventListener('click', async ()=>{
+  await loadActiveEvents(); await loadArchivedEvents(); await loadUsers();
+  await renderStats(); renderUserTable(); renderEventManageList(); toast('Dati aggiornati');
+});
 
-function renderUserTable(){
-  let rows = DB.users;
+async function renderUserTable(){
+  let rows = USERS;
   if(opSearchTerm){
-    rows = rows.filter(u => (u.nome+' '+u.cognome+' '+u.email+' '+u.tel+' '+u.code).toLowerCase().includes(opSearchTerm));
+    rows = rows.filter(u => (u.nome+' '+u.cognome+' '+u.telefono+' '+u.qr_code).toLowerCase().includes(opSearchTerm));
   }
   const tbody = $('opUserTable');
   if(!rows.length){
-    tbody.innerHTML = `<tr><td colspan="3" class="empty">${DB.users.length? 'Nessun utente corrisponde alla ricerca.' : 'Nessun utente registrato ancora.'}</td></tr>`;
-  } else {
-    tbody.innerHTML = rows.map(u=>{
-      const checkins = (u.tickets||[]).filter(t=>t.used).length;
-      return `<tr>
-        <td><b>${esc(u.nome)} ${esc(u.cognome)}</b><br><span style="color:var(--grey);font-size:11px;">${esc(u.code)} · ${checkins} check-in</span></td>
-        <td>${esc(u.email)}<br><span style="color:var(--grey);font-size:11px;">${esc(u.tel)}</span></td>
-        <td style="color:var(--yellow);font-weight:800;">${esc(u.points)}</td>
-      </tr>`;
-    }).join('');
+    tbody.innerHTML = `<tr><td colspan="3" class="empty">${USERS.length? 'Nessun utente corrisponde alla ricerca.' : 'Nessun utente registrato ancora.'}</td></tr>`;
+    return;
   }
+  const counts = await Promise.all(rows.map(u=> checkinsForUser(u.id)));
+  tbody.innerHTML = rows.map((u,i)=>{
+    return `<tr>
+      <td><b>${esc(u.nome)} ${esc(u.cognome)}</b><br><span style="color:var(--grey);font-size:11px;">${esc(u.qr_code)} · ${counts[i]} check-in</span></td>
+      <td>${esc(u.telefono)}</td>
+      <td style="color:var(--yellow);font-weight:800;">${esc(u.punti)}</td>
+    </tr>`;
+  }).join('');
 }
 
 /* ================= EXPORT EXCEL ================= */
 $('btnExportXlsx').addEventListener('click', async ()=>{
-  await withFreshDB(()=>{});
-  if(!DB.users.length){ toast('Nessun utente da esportare', true); return; }
-  const usersRows = DB.users.map(u=>({
-    Nome:u.nome, Cognome:u.cognome, Telefono:u.tel, Email:u.email,
-    'Punti attuali':u.points,
-    'Ticket generati': (u.tickets||[]).length,
-    'Check-in effettuati': (u.tickets||[]).filter(t=>t.used).length,
-    'Codice QR personale':u.code
+  await loadUsers(); await loadActiveEvents(); await loadArchivedEvents();
+  if(!USERS.length){ toast('Nessun utente da esportare', true); return; }
+  const checkinCounts = await Promise.all(USERS.map(u=> checkinsForUser(u.id)));
+  const usersRows = USERS.map((u,i)=>({
+    Nome:u.nome, Cognome:u.cognome, Telefono:u.telefono,
+    'Punti attuali':u.punti,
+    'Check-in effettuati': checkinCounts[i],
+    'Codice QR personale':u.qr_code
   }));
-  const eventsRows = DB.events.map(e=>{
+  const allEvents = [...EVENTS_ACTIVE, ...EVENTS_ARCHIVE];
+  const eventsRows = [];
+  for(const e of allEvents){
     let total, used;
-    if(e.archived && e.archiveStats){
-      total = e.archiveStats.total; used = e.archiveStats.used;
-    } else {
-      const tickets = [];
-      DB.users.forEach(u=> (u.tickets||[]).forEach(t=>{ if(t.eventId===e.id) tickets.push(t); }));
-      total = tickets.length; used = tickets.filter(t=>t.used).length;
-    }
-    return {
-      Titolo:e.title, Data:e.date, Orario:e.time, Luogo:e.place,
+    if(e.archived){ total = e.archive_total||0; used = e.archive_used||0; }
+    else { const c = await ticketCountsForEvent(e.id); total = c.total; used = c.used; }
+    eventsRows.push({
+      Titolo:e.title, Data:e.event_date, Orario:e.event_time, Luogo:e.place,
       Stato: e.archived ? 'Concluso' : 'Attivo',
       'Ticket generati': total,
       'Check-in effettuati': used
-    };
-  });
+    });
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usersRows), 'Utenti');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(eventsRows), 'Eventi');
@@ -809,19 +749,22 @@ function startPolling(){
   stopPolling();
   pollId = setInterval(async ()=>{
     if(camActive) return;
-    await withFreshDB(()=>{});
-    renderStats();
+    await loadActiveEvents(); await loadArchivedEvents(); await loadUsers();
+    await renderStats();
     if($('tab-users').classList.contains('active')) renderUserTable();
     if($('tab-events').classList.contains('active')) renderEventManageList();
-  }, 6000);
+  }, 8000);
 }
 function stopPolling(){ if(pollId){ clearInterval(pollId); pollId=null; } }
 
 /* ================= INIT ================= */
 (async function init(){
-  await loadDB();
-  const s = await loadOpSession();
-  if(s.loggedIn){ await enterDashboard(); }
+  const { data: sess } = await sb.auth.getSession();
+  const user = sess && sess.session ? sess.session.user : null;
+  if(user){
+    const { data: op } = await sb.from('operators').select('*').eq('id', user.id).eq('attivo', true).maybeSingle();
+    if(op){ currentOperator = op; await enterDashboard(); }
+  }
 })();
 </script>
 </body>

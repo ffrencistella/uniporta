@@ -6,6 +6,7 @@
 <title>UNIPORTA</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700;800&display=swap');
 
@@ -342,7 +343,7 @@
       <div id="authLogin">
         <div class="sheet-title">Bentornato</div>
         <div class="sheet-sub">Accedi per partecipare agli eventi UniPorta</div>
-        <div class="field"><label>Email o telefono</label><input type="text" id="loginId" placeholder="mario.rossi@email.com"></div>
+        <div class="field"><label>Email</label><input type="email" id="loginId" placeholder="mario.rossi@email.com"></div>
         <div class="field"><label>Password</label><input type="password" id="loginPw" placeholder="••••••••"></div>
         <div class="err" id="loginErr"></div>
         <button class="btn btn-primary" id="btnDoLogin">Accedi</button>
@@ -399,6 +400,11 @@
 </div>
 
 <script>
+/* ================= SUPABASE ================= */
+const SUPABASE_URL = 'https://lmaaeehjcayweiqfbaul.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_AJvuK41LyXPresYx-oPd3g_voMzlkrP';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 /* ================= UTILS ================= */
 function $(id){ return document.getElementById(id); }
 function esc(str){
@@ -416,9 +422,7 @@ function renderQR(el, text){
   el.innerHTML = '';
   new QRCode(el, { text: text, width: 130, height: 130, colorDark:'#0c0c0c', colorLight:'#ffffff' });
 }
-function normPhone(t){ return (t||'').replace(/[^\d+]/g,''); }
 function genCode(prefix){ return prefix+'-' + Math.random().toString(16).slice(2,8).toUpperCase(); }
-function genId(prefix){ return prefix+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
 /* window.confirm() è spesso bloccato negli ambienti di anteprima sandboxed:
    il click sul bottone non fa nulla in quei casi. Questa conferma interna
@@ -440,84 +444,46 @@ function showConfirm(msg){
   });
 }
 
-/* ================= STORAGE LAYER =================
-   Demo: usa window.storage (shared) per simulare un DB condiviso con
-   l'app operatore (stesso DB_KEY). Prima di ogni scrittura ricarico i
-   dati più recenti per ridurre il rischio di sovrascritture concorrenti.
-   In produzione questo diventa un vero backend (vedi guida Supabase).
+/* ================= STATO IN MEMORIA =================
+   EVENTS: eventi pubblicati (non archiviati), ricaricati da Supabase.
+   PROFILE: il profilo dell'utente loggato (tabella profiles), null se ospite.
+   TICKETS: i ticket del solo utente loggato (tabella tickets), per poter
+   controllare sincronamente "hai già un ticket per questo evento?".
+   HISTORY: storico punti dell'utente loggato (tabella points_log). */
+let EVENTS = [];
+let PROFILE = null;
+let TICKETS = [];
+let HISTORY = [];
 
-   NOTA: window.storage esiste solo dentro l'anteprima di Claude. Se il
-   file viene ospitato altrove (GitHub Pages, hosting proprio, ecc.) non
-   esiste, quindi qui sotto uso localStorage del browser come fallback:
-   i dati restano salvati ma solo su quel browser/dispositivo, non
-   condivisi con l'app operatore su un altro telefono — per quello serve
-   il backend Supabase descritto nella guida. */
-
-const hasArtifactStorage = (typeof window.storage !== 'undefined');
-async function storageGet(key, shared){
-  if(hasArtifactStorage){
-    try{ return await window.storage.get(key, shared); }catch(e){ return null; }
-  }
-  try{
-    const raw = localStorage.getItem(key);
-    return raw ? { key, value: raw, shared } : null;
-  }catch(e){ return null; }
-}
-async function storageSet(key, value, shared){
-  if(hasArtifactStorage){
-    try{ return await window.storage.set(key, value, shared); }catch(e){ return null; }
-  }
-  try{ localStorage.setItem(key, value); return { key, value, shared }; }
-  catch(e){ return null; }
+async function loadEvents(){
+  const { data, error } = await sb.from('events')
+    .select('*').eq('archived', false).order('created_at', { ascending:true });
+  if(error){ console.error(error); EVENTS = []; return; }
+  EVENTS = data || [];
 }
 
-const DB_KEY = 'uniporta_db_v3';
-let DB = { users: [], events: [] };
-let session = { userId: null };
-
-function defaultEvents(){
-  return [
-    { id:genId('ev'), title:'APERICAMPUS NIGHT', date:'Giovedì 18 Settembre', time:'21:30',
-      place:'Chiringuito Wave, Rimini', desc:'Serata di apertura semestre per fuorisede e studenti UniPorta: musica, drink di benvenuto e networking sulla spiaggia.', posterDataUrl:null },
-    { id:genId('ev'), title:'CLUB 1 PIANO — OPENING', date:'Sabato 20 Settembre', time:'23:00',
-      place:'Club 1 Piano, Rimini', desc:'Serata di apertura stagione: dress code smart, ingresso gratuito con ticket UniPorta.', posterDataUrl:null }
-  ];
+async function loadMyTickets(){
+  if(!PROFILE){ TICKETS = []; return; }
+  const { data, error } = await sb.from('tickets').select('*').eq('user_id', PROFILE.id);
+  if(error){ console.error(error); TICKETS = []; return; }
+  TICKETS = data || [];
 }
 
-async function loadDB(){
-  try{
-    const res = await storageGet(DB_KEY, true);
-    if(res && res.value){ DB = JSON.parse(res.value); }
-  }catch(e){ /* prima esecuzione: nessun dato ancora */ }
-  if(!DB.events || !DB.events.length) DB.events = defaultEvents();
-  if(!DB.users) DB.users = [];
-  await saveDB();
-}
-async function saveDB(){
-  try{ await storageSet(DB_KEY, JSON.stringify(DB), true); }
-  catch(e){ console.error('Storage error', e); }
-}
-async function withFreshDB(mutator){
-  try{
-    const res = await storageGet(DB_KEY, true);
-    if(res && res.value){ DB = JSON.parse(res.value); }
-  }catch(e){ /* nessun dato remoto ancora */ }
-  if(!DB.events || !DB.events.length) DB.events = defaultEvents();
-  if(!DB.users) DB.users = [];
-  const result = mutator(DB);
-  await saveDB();
-  return result;
+async function loadMyProfile(){
+  const { data: sess } = await sb.auth.getSession();
+  const user = sess && sess.session ? sess.session.user : null;
+  if(!user){ PROFILE = null; return; }
+  const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  if(error || !data){ PROFILE = null; return; }
+  PROFILE = data;
 }
 
-const SESSION_KEY = 'uniporta_user_session';
-async function saveSession(){
-  try{ await storageSet(SESSION_KEY, JSON.stringify(session), false); }catch(e){}
-}
-async function loadSession(){
-  try{
-    const res = await storageGet(SESSION_KEY, false);
-    if(res && res.value){ session = JSON.parse(res.value); }
-  }catch(e){}
+async function loadMyHistory(){
+  if(!PROFILE){ HISTORY = []; return; }
+  const { data, error } = await sb.from('points_log').select('*')
+    .eq('user_id', PROFILE.id).order('created_at', { ascending:false });
+  if(error){ console.error(error); HISTORY = []; return; }
+  HISTORY = data || [];
 }
 
 /* ================= NAVIGAZIONE ================= */
@@ -531,18 +497,18 @@ document.querySelectorAll('[data-back]').forEach(b=>{
 });
 document.querySelector('.logo-img').addEventListener('click', ()=> showView('view-home'));
 
-function currentUser(){ return DB.users.find(u=>u.id===session.userId) || null; }
+function currentUser(){ return PROFILE; }
 
 /* ================= HOME / LISTA EVENTI ================= */
 let selectedEventId = null;
 
-function renderHome(){
+async function renderHome(){
+  await loadEvents();
   const list = $('eventList');
-  const events = DB.events.filter(e => !e.archived);
-  if(!events.length){ list.innerHTML = '<div class="empty">Nessun evento pubblicato al momento.</div>'; return; }
-  list.innerHTML = events.map(e=>{
-    const hasImg = !!e.posterDataUrl;
-    const bg = hasImg ? `style="background-image:url('${e.posterDataUrl}')"` : '';
+  if(!EVENTS.length){ list.innerHTML = '<div class="empty">Nessun evento pubblicato al momento.</div>'; return; }
+  list.innerHTML = EVENTS.map(e=>{
+    const hasImg = !!e.poster_url;
+    const bg = hasImg ? `style="background-image:url('${e.poster_url}')"` : '';
     return `
     <div class="event-card" data-event="${esc(e.id)}">
       <div class="poster-mini ${hasImg?'':'no-img'}" ${bg}>
@@ -551,8 +517,8 @@ function renderHome(){
       <div class="ec-body">
         <h3>${esc(e.title)}</h3>
         <div class="ec-meta">
-          <span>📅 <b>${esc(e.date)}</b></span>
-          <span>🕘 <b>${esc(e.time)}</b></span>
+          <span>📅 <b>${esc(e.event_date)}</b></span>
+          <span>🕘 <b>${esc(e.event_time)}</b></span>
           <span>📍 <b>${esc(e.place)}</b></span>
         </div>
       </div>
@@ -563,21 +529,21 @@ function renderHome(){
   });
 }
 
-function getEvent(id){ return DB.events.find(e=>e.id===id) || null; }
+function getEvent(id){ return EVENTS.find(e=>e.id===id) || null; }
 
 function openEventDetail(id){
   const e = getEvent(id);
   if(!e) return;
   selectedEventId = id;
   $('ev-title').textContent = e.title;
-  $('ev-date').textContent = e.date;
-  $('ev-time').textContent = e.time;
+  $('ev-date').textContent = e.event_date;
+  $('ev-time').textContent = e.event_time;
   $('ev-place').textContent = e.place;
-  $('ev-desc').textContent = e.desc;
+  $('ev-desc').textContent = e.description || 'Nessuna descrizione fornita.';
   const posterEl = $('ev-poster');
-  if(e.posterDataUrl){
+  if(e.poster_url){
     posterEl.classList.remove('no-img');
-    posterEl.style.backgroundImage = `url('${e.posterDataUrl}')`;
+    posterEl.style.backgroundImage = `url('${e.poster_url}')`;
   } else {
     posterEl.classList.add('no-img');
     posterEl.style.backgroundImage = '';
@@ -586,8 +552,8 @@ function openEventDetail(id){
   showView('view-event');
 }
 
-function myTicketFor(u, eventId){
-  return u && u.tickets ? u.tickets.find(t=>t.eventId===eventId) : null;
+function myTicketFor(eventId){
+  return TICKETS.find(t=>t.event_id===eventId) || null;
 }
 
 function updatePartecipaState(){
@@ -600,7 +566,7 @@ function updatePartecipaState(){
     note.textContent='Accedi o registrati al momento della conferma.'; note.className='status-note';
     return;
   }
-  const t = myTicketFor(u, e.id);
+  const t = myTicketFor(e.id);
   if(t){
     btn.disabled=false; btn.textContent='Visualizza il tuo ticket';
     note.textContent = t.used ? 'Ticket già scansionato all\'ingresso — punto accreditato.' : 'Hai già un ticket per questo evento.';
@@ -630,38 +596,44 @@ $('btnDoRegister').addEventListener('click', async ()=>{
   if(!nome||!cognome||!telRaw||!email||!pw){ err.textContent='Compila tutti i campi.'; return; }
   if(pw.length<6){ err.textContent='La password deve avere almeno 6 caratteri.'; return; }
   if(!/^\S+@\S+\.\S+$/.test(email)){ err.textContent='Inserisci un indirizzo email valido.'; return; }
-  const tel = normPhone(telRaw);
-  if(tel.length<6){ err.textContent='Inserisci un numero di telefono valido.'; return; }
 
   const btn = $('btnDoRegister'); btn.disabled = true;
-  let newUser = null, dupErr = null;
-  await withFreshDB(db=>{
-    if(db.users.some(u=>u.email===email)){ dupErr='Esiste già un account con questa email.'; return; }
-    if(db.users.some(u=>normPhone(u.tel)===tel)){ dupErr='Esiste già un account con questo numero di telefono.'; return; }
-    newUser = { id:genId('u'), nome, cognome, tel:telRaw, email, pw, points:0, code:genCode('UP'), tickets:[], history:[] };
-    db.users.push(newUser);
+  const { data, error } = await sb.auth.signUp({ email, password: pw });
+  if(error){ btn.disabled=false; err.textContent = error.message==='User already registered' ? 'Esiste già un account con questa email.' : error.message; return; }
+
+  if(!data.session){
+    // Conferma email richiesta dal progetto Supabase: senza sessione attiva
+    // non possiamo ancora creare il profilo (le regole di sicurezza lo richiedono).
+    btn.disabled=false;
+    closeAuth();
+    toast('Controlla la tua email per confermare l\'account, poi accedi.');
+    return;
+  }
+
+  const { error: profErr } = await sb.from('profiles').insert({
+    id: data.user.id, nome, cognome, telefono: telRaw
   });
   btn.disabled = false;
-  if(dupErr){ err.textContent = dupErr; return; }
-  session = { userId:newUser.id };
-  await saveSession();
+  if(profErr){ err.textContent = 'Account creato ma profilo non salvato: ' + profErr.message; return; }
+
+  await loadMyProfile();
+  await loadMyTickets();
   closeAuth();
   toast('Account creato ✓');
   afterLoginFlow();
 });
 
 $('btnDoLogin').addEventListener('click', async ()=>{
-  const id=$('loginId').value.trim().toLowerCase(); const pw=$('loginPw').value;
+  const email=$('loginId').value.trim().toLowerCase(); const pw=$('loginPw').value;
   const err=$('loginErr'); err.textContent='';
-  if(!id||!pw){ err.textContent='Inserisci email/telefono e password.'; return; }
-  await withFreshDB(()=>{});
-  const idPhone = normPhone(id);
-  const u = DB.users.find(u=> (u.email===id || normPhone(u.tel)===idPhone) && u.pw===pw);
-  if(!u){ err.textContent='Credenziali non valide.'; return; }
-  session = { userId:u.id };
-  await saveSession();
+  if(!email||!pw){ err.textContent='Inserisci email e password.'; return; }
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pw });
+  if(error){ err.textContent = 'Credenziali non valide.'; return; }
+  await loadMyProfile();
+  await loadMyTickets();
+  if(!PROFILE){ err.textContent = 'Profilo non trovato per questo account.'; return; }
   closeAuth();
-  toast('Bentornato, '+u.nome+'!');
+  toast('Bentornato, '+PROFILE.nome+'!');
   afterLoginFlow();
 });
 
@@ -689,35 +661,33 @@ $('btnPartecipa').addEventListener('click', ()=>{
 
 async function doPartecipa(){
   const e = getEvent(selectedEventId);
-  if(!e || !session.userId) return;
-  let u = null;
-  await withFreshDB(db=>{
-    u = db.users.find(x=>x.id===session.userId);
-    if(!u) return;
-    if(!myTicketFor(u, e.id)){
-      // snapshot dei dati evento al momento della partecipazione: se l'operatore
-      // modifica poi titolo/data/orario/luogo, questo ticket resta invariato
-      u.tickets.push({
-        eventId:e.id, code:genCode('TK'), used:false, createdAt:new Date().toISOString(), usedAt:null,
-        eventSnapshot: { title:e.title, date:e.date, time:e.time, place:e.place }
-      });
+  if(!e || !PROFILE) return;
+  let t = myTicketFor(e.id);
+  if(!t){
+    const { data, error } = await sb.from('tickets').insert({
+      user_id: PROFILE.id, event_id: e.id, code: genCode('TK'),
+      event_title: e.title, event_date: e.event_date, event_time: e.event_time, event_place: e.place
+    }).select().maybeSingle();
+    if(error){
+      // può capitare per una corsa tra due tentativi ravvicinati: ricarico i ticket
+      await loadMyTickets();
+      t = myTicketFor(e.id);
+      if(!t){ toast('Non sono riuscito a creare il ticket, riprova.'); return; }
+    } else {
+      TICKETS.push(data);
+      t = data;
     }
-  });
-  if(!u){ toast('Sessione scaduta, accedi di nuovo.'); session.userId=null; await saveSession(); openAuth('partecipa'); return; }
-  const t = myTicketFor(u, e.id);
-  renderTicket(u, e, t);
+  }
+  renderTicket(PROFILE, t);
   updatePartecipaState();
   showView('view-ticket');
 }
 
-function renderTicket(u, e, t){
-  // usa lo snapshot salvato alla partecipazione quando disponibile, non i dati
-  // live dell'evento, per non alterare un ticket già emesso in caso di modifica
-  const snap = t.eventSnapshot || { title:e.title, date:e.date, time:e.time, place:e.place };
-  $('tk-title').textContent = snap.title;
+function renderTicket(u, t){
+  $('tk-title').textContent = t.event_title;
   $('tk-name').textContent = u.nome+' '+u.cognome;
-  $('tk-place').textContent = snap.place;
-  $('tk-when').textContent = snap.date+' · '+snap.time;
+  $('tk-place').textContent = t.event_place;
+  $('tk-when').textContent = t.event_date+' · '+t.event_time;
   $('tk-code').textContent = t.code;
   renderQR($('tk-qr'), t.code);
 
@@ -730,7 +700,7 @@ function renderTicket(u, e, t){
     statusEl.textContent = 'In attesa di check-in — mostra il QR allo staff per il punto';
   }
 
-  const msg = `🎟️ Ticket UniPorta%0A%0A${snap.title}%0A${u.nome} ${u.cognome}%0A📍 ${snap.place}%0A🗓️ ${snap.date} · ${snap.time}%0ACodice ticket: ${t.code}%0A%0AMostra questo QR all'ingresso (valido una sola volta).`;
+  const msg = `🎟️ Ticket UniPorta%0A%0A${t.event_title}%0A${u.nome} ${u.cognome}%0A📍 ${t.event_place}%0A🗓️ ${t.event_date} · ${t.event_time}%0ACodice ticket: ${t.code}%0A%0AMostra questo QR all'ingresso (valido una sola volta).`;
   $('btnWhatsapp').href = `https://wa.me/?text=${msg}`;
 }
 
@@ -742,9 +712,8 @@ $('btnDownloadTicket').addEventListener('click', async ()=>{
   try{
     const canvas = await html2canvas(ticketEl, { backgroundColor:'#ffffff', scale:2 });
     const link = document.createElement('a');
-    const u = currentUser();
     const e = getEvent(selectedEventId);
-    const t = u && e ? myTicketFor(u, e.id) : null;
+    const t = e ? myTicketFor(e.id) : null;
     link.download = 'uniporta-ticket-' + (t ? t.code : 'evento') + '.png';
     link.href = canvas.toDataURL('image/png');
     link.click();
@@ -763,23 +732,25 @@ const TIERS = [
   { pts:50, label:'Drink omaggio', sub:'Un drink omaggio a scelta' },
 ];
 
-function openProfile(){
+async function openProfile(){
   const u = currentUser();
   if(!u){ openAuth('profile'); return; }
-  $('pf-initials').textContent = initials(u.nome,u.cognome);
-  $('pf-name').textContent = u.nome+' '+u.cognome;
-  $('pf-contact').textContent = u.email+' · '+u.tel;
-  $('pf-points').textContent = u.points;
-  $('pf-code').textContent = u.code;
-  renderQR($('pf-qr'), u.code);
-  renderTiers(u);
-  renderHistory(u);
+  await loadMyProfile();
+  await loadMyHistory();
+  $('pf-initials').textContent = initials(PROFILE.nome,PROFILE.cognome);
+  $('pf-name').textContent = PROFILE.nome+' '+PROFILE.cognome;
+  $('pf-contact').textContent = PROFILE.telefono;
+  $('pf-points').textContent = PROFILE.punti;
+  $('pf-code').textContent = PROFILE.qr_code;
+  renderQR($('pf-qr'), PROFILE.qr_code);
+  renderTiers();
+  renderHistory();
   showView('view-profile');
 }
 
-function renderTiers(u){
+function renderTiers(){
   $('pf-tiers').innerHTML = TIERS.map(t=>{
-    const ready = u.points >= t.pts;
+    const ready = PROFILE.punti >= t.pts;
     return `<div class="tier-item ${ready?'ready':''}" data-tier="${t.pts}">
       <div class="tier-check">${t.pts}</div>
       <div class="tier-txt"><div class="tt">${esc(t.label)}</div><div class="ts">${ready? t.pts+' punti · disponibile' : 'Richiede '+t.pts+' punti'} · ${esc(t.sub)}</div></div>
@@ -796,29 +767,26 @@ async function redeemTier(pts){
   if(!tier) return;
   const ok = await showConfirm(`Vuoi riscattare "${tier.label}" per ${tier.pts} punti? Mostra la conferma allo staff per ricevere il premio.`);
   if(!ok) return;
-  let u = null, failMsg = null;
-  await withFreshDB(db=>{
-    u = db.users.find(x=>x.id===session.userId);
-    if(!u){ failMsg='Sessione scaduta.'; return; }
-    if(u.points < tier.pts){ failMsg='Punti insufficienti — qualcosa è cambiato, riprova.'; return; }
-    u.points -= tier.pts;
-    u.history.unshift({ label:'Vantaggio riscattato: '+tier.label, date:new Date().toLocaleDateString('it-IT'), pts:-tier.pts, type:'redeem' });
-  });
-  if(failMsg){ toast(failMsg); return; }
+  const { data, error } = await sb.rpc('redeem_tier', { p_points: pts });
+  if(error || !data || !data.ok){
+    toast(data && data.error==='not_enough_points' ? 'Punti insufficienti — qualcosa è cambiato, riprova.' : 'Non sono riuscito a completare il riscatto.');
+    return;
+  }
   toast('Vantaggio riscattato ✓ mostralo allo staff');
-  openProfile();
+  await openProfile();
 }
 
-function renderHistory(u){
+function renderHistory(){
   const hist = $('pf-history');
-  if(!u.history.length){
+  if(!HISTORY.length){
     hist.innerHTML = '<div class="empty">Nessun movimento ancora — partecipa a un evento per iniziare ad accumulare punti.</div>';
   } else {
-    hist.innerHTML = u.history.map(h=>{
-      const positive = h.pts >= 0;
+    hist.innerHTML = HISTORY.map(h=>{
+      const positive = h.points >= 0;
+      const date = new Date(h.created_at).toLocaleDateString('it-IT');
       return `<div class="history-item">
-        <div><div class="name">${esc(h.label)}</div><div class="date">${esc(h.date)}</div></div>
-        <div class="pts ${positive?'pos':'neg'}">${positive?'+':''}${esc(h.pts)} pt</div>
+        <div><div class="name">${esc(h.reason)}</div><div class="date">${esc(date)}</div></div>
+        <div class="pts ${positive?'pos':'neg'}">${positive?'+':''}${esc(h.points)} pt</div>
       </div>`;
     }).join('');
   }
@@ -826,17 +794,17 @@ function renderHistory(u){
 
 $('btnUserTop').addEventListener('click', openProfile);
 $('btnLogout').addEventListener('click', async ()=>{
-  session.userId = null;
-  await saveSession();
+  await sb.auth.signOut();
+  PROFILE = null; TICKETS = []; HISTORY = [];
   toast("Uscito dall'account");
   showView('view-home');
 });
 
 /* ================= INIT ================= */
 (async function init(){
-  await loadDB();
-  await loadSession();
-  renderHome();
+  await loadMyProfile();
+  await loadMyTickets();
+  await renderHome();
 })();
 </script>
 </body>
