@@ -479,17 +479,20 @@ async function loadMyProfile(knownUserId){
     const { data: sess } = await sb.auth.getSession();
     userId = sess && sess.session ? sess.session.user.id : null;
   }
-  if(!userId){ PROFILE = null; return; }
+  LAST_PROFILE_ERROR = null;
+  if(!userId){ PROFILE = null; LAST_PROFILE_ERROR = 'nessuna sessione attiva'; return; }
   // Un profilo appena creato dal trigger del database potrebbe non essere
   // ancora visibile al primissimo tentativo: riproviamo un paio di volte
   // con una breve pausa prima di arrenderci.
   for(let attempt=0; attempt<3; attempt++){
     const { data, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
     if(!error && data){ PROFILE = data; return; }
+    if(error) LAST_PROFILE_ERROR = error.message + ' (codice: ' + (error.code||'?') + ')';
     if(attempt<2) await new Promise(r=>setTimeout(r, 500));
   }
   PROFILE = null;
 }
+let LAST_PROFILE_ERROR = null;
 
 async function loadMyHistory(){
   if(!PROFILE){ HISTORY = []; return; }
@@ -647,7 +650,7 @@ $('btnDoLogin').addEventListener('click', async ()=>{
   if(error){ err.textContent = 'Credenziali non valide.'; return; }
   await loadMyProfile(data.user.id);
   await loadMyTickets();
-  if(!PROFILE){ err.textContent = 'Profilo non trovato per questo account.'; return; }
+  if(!PROFILE){ err.textContent = 'Profilo non trovato per questo account.' + (LAST_PROFILE_ERROR ? (' [debug: '+LAST_PROFILE_ERROR+']') : ' [debug: nessun errore restituito, ma nessuna riga trovata]'); return; }
   closeAuth();
   toast('Bentornato, '+PROFILE.nome+'!');
   afterLoginFlow();
