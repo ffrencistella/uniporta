@@ -636,7 +636,7 @@ $('btnDoRegister').addEventListener('click', async ()=>{
 
   await loadMyProfile(data.user.id);
   await loadMyTickets();
-  if(!PROFILE){ err.textContent = 'Account creato ma il profilo non è ancora pronto: riprova ad accedere tra qualche secondo.'; return; }
+  if(!PROFILE){ err.textContent = 'Account creato ma il profilo non è ancora pronto.' + (LAST_PROFILE_ERROR ? (' [debug: '+LAST_PROFILE_ERROR+']') : ' [debug: nessun errore restituito, ma nessuna riga trovata]'); return; }
   closeAuth();
   toast('Account creato ✓');
   afterLoginFlow();
